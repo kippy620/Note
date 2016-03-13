@@ -1,0 +1,65 @@
+* Chapter 3  Machine-Level ISA
+M-mode 是 RISC-V 系统中特权最高的o模式。是在 RISC-V 硬件实现中唯一的强制的特权模式。被用来给低级模式访问硬件平台，并且是在通电重置之后第一个被进入的模式。M-mode 也能用来实现直接在硬件上实现太难太贵的特性。RISC-V machine-level ISA 包含一个普通的核，它被拓展依靠其他特权级别被支持的和硬件实现的其他细节。
+** 3.1 Machine-Level CSRs
+除了被描述在这一章节的 machine-level CSRs，M-mode 代码可以访问所有较低级的特权等级的所有 CSRs。
+*** 3.1.1 CPU ID Register mcpuid 
+mcpuid 是只读寄存器包含关于 CPU 实现的功能的信息。
+
+[[file:image/mcpuid.png]]
+
+
+*Base 字段* 编码基本整型 ISA，如表 3.1。
+
+-Table 3.1：Encoding of Base field in mcpuid
+
+| Value | Description |
+|-------+-------------|
+|     0 | RV32I       |
+|     1 | RV32E       |
+|     2 | RV64I       |
+|     3 | RV128I      |
+
+*Extension 字段* 编码存在的标准拓展，每一个字母表的字母一个比特（bit 0 编码拓展集 *A*,bit 1 编码拓展集 *B*,一直到 bit 25 编码未来的标准拓展集 *Z* ）。 *I* 位将会被给 *RV32I* ， *RV64I* ， *RV128I* 基本 ISAs 设置，并且 *E* 会为 *RV32E* 设置。 *X* 会为被置位假如有任何非标准的拓展集。
+
+*** 3.1.2 Implementation ID Register mimpid
+
+mimpid 提供唯一的源和处理器实现的版本。寄存器在任何实现中必须可读，但是返回 0 暗示数据域没被实现。
+
+[[file:image/mimpid.png]]
+
+ 16-bit 源域被用来描述处理器设计的来源，被分为两大类：开源协议和专利实现。0x0001-0x7FFE 是为开源项目预留的，然而 0x8001-0xFFFE 是为专利实现预留的。0x7FFF 和 0xFFFF 是为未来拓展预留的。0x8000 是预留来指明一个匿名的源，在一个 Source ID 被分配之前在发展中被使用的。
+
+通常的源分配值如表 3.2。
+
+-Table 3.2：Encoding of Source field in mimpid
+
+|  Source field | Description                              |
+|---------------+------------------------------------------|
+|        0x0000 | CPU ID unimplemented                     |
+|        0x0001 | UC Berkeley Rocket repo                  |
+| 0x0002-0x7FFE | Reserved for open-source repos           |
+|        0x7FFF | Reserved for extension                   |
+|        0x8000 | Reserved for anonymous source            |
+| 0x8001-0xFFFE | Reserved for proprietary implementations |
+|        0xFFFF | Reserved for extension                   |
+
+mimpid 剩下的 XLEN-16 位是可获得的去编码设计的细节实现，包括微体系类型和版本号。这个域的格式在源提供者的左边，但是将被作为没有零拓展的十六进制字符串用标准工具打印出来，所以 Implementation 值应该右对齐在半字节边界来缓和人类可读性。
+
+mimpid 应该反映 RISC-V 处理器自身而不是任何周围的系统。分离机制应该被用来编码外部系统细节。
+
+*** 3.1.4 Machine Status Register (mstatus)
+
+mstatus 读写寄存器格式如下图，记录和控制硬件线程（hart）的当前操作状态。
+
+[[file:image/mstatus.png]]
+
+*** 3.1.5 Privilege and Global Interrupt-Enable Stack in mstatus register
+
+PRV[1:0] 域存储 hart 的当前特权模式，编码如表 1.1。假如实现指提供 M-mode，那么这两位硬连线到二进制 11 上。
+
+IE 位指明当前模式下，中断是否使能（1=Enabled,0=Disabled）,并且主要被用于无效中断来确保当前特权级别下中断处理。当 hart 在指定特权模式下运行的话，较高特权模式的中断总是使能，然而较低等级特权模式总是无效。高级特权等级代码能在转让控制权给低级特权之前使用分离每个中断使能位去无效被选中的中断。
+
+支持嵌套的自陷，PRV 和 IE 位的栈是被提供的，深度等于被支持的特权模式的数量，PRV0 是有效的特权模式 PRV （例如，PRV0-PRVN 对于 N 特权模式），期望假如只支持机器模式的实现，在这种情况下栈深是二并且所有 PRV 被硬连线为 11。当自陷发生，栈被压到左边，PRV 被设置为有效的自陷处理的特权模式
+
+**** 注意
+位于 bit 0 的有效的 IE 允许用单独 CSR 指令原子地对它进行置位或者清空。 

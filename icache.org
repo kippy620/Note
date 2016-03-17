@@ -1,0 +1,266 @@
+* Icache 设计与实现
+
+Icache 的设计模块如表 1-1 所示。
+
+- 表 1-1：Icache 的模块一览表
+
+| 模块名        | 文件名          | 说明                  |
+|---------------+-----------------+-----------------------|
+| icache_ctrl   | icache_ctrl.v   | L1_icache 的控制模块  |
+| L2_cache_ctrl | L2_cache_ctrl.v | L2_cache 的控制模块   |
+| tag_ram       | tag_ram.v       | tag_ram of L1_icache  |
+| data_ram      | data_ram.v      | data_ram of L1_icache |
+| L2_tag_ram    | L2_tag_ram.v    | tag_ram of L2_cache   |
+| L2_data_ram   | L2_data_ram.v   | data_ram of L2_cache  |
+| sram_256      | sram_256.v      | sram of L1_icache     |
+| sram_512      | sram_512.v      | sram of L2_icache     |
+
+** 指令 cache 的概述
+
+在前一章节中,我们说到了 Cache 设计时所需要考虑的一些共性问题。然而指令 Cache 有其特殊之处,因为指令不会被修改,并且 CPU 读取指令时,都是按字(4-byte)读取的。因此,指令 Cache 的设计无需考虑更新策略的问题。那么指令 Cache 需要考虑的主要问题还有:映射方式、组相联度、块大小、Cache 容量和替换算法等问题。根据上一章的论述,本次设计中指令 Cache 采用的映射方式为组相联映射方式;组相联度为两路;块大小为 4-word(128-bit);Cache 容量为 8 KB;替换算法为最近最少被使用(LRU)算法。
+
+*** LRU 算法
+
+LRU 替换算法能够很好地体现程序局部性原理,从而改善访存的不命中率,提高计算机整体性能。如图 1.1 是在 Cache 容量为 8KB 时,四种典型替换算法(PLRU 是 LRU 的近似算法,后续章节中会讲到)在不同的组相联度下与 Cache 访问不命中率之间的关系。从图中可知,LRU 替换算法可以获得更高的命中率,但 LRU 算法的实现相对是最复杂的。下面我们将讨论 LRU 替换算法在两路组相联指令 Cache 中是如何实现的。
+
+[[file:image/replacement_policy.png]]
+
+- 图 1.1：四种典型替换算法相联度和缺失率的关系图
+
+在 Cache 访问不命中时,需要从下一层的存储器中取出一个数据块来填充当前层的存储器。此时,当前层存储器被映射的行若未满,则选择无效块填充;若当前层存储器被映射的行已满,则选择由 LRU 算法指定的最近最少被使用的块填充。在本次设计的两路组相联指令 Cache 中,LRU 算法的具体替换流程如图 1.2 所示。由图 1.2 及指令 Cache 的访问行为可以总结出 LRU 算法的具体实现如表 1-2 所示。例如,此次访问(指令 Cache 为读操作)的是 Cache 中一行的第 0 块,那么 LRU 的值就会被修改为 1,说明下次要被替换出去的将是第 1 行。
+
+[[file:image/replacement.png]]
+
+- 图 1.2：LRU 算法的具体替换流程图
+
+- 表 1-2：LRU 算法的具体实现表
+
+| LRU 域当前值 | 替换块号 | 当前访问块号 | LUR 域新值 |
+|--------------+----------+--------------+------------|
+|            0 |        0 |            0 |          1 |
+|            1 |        1 |            1 |          0 |
+
+** 指令 cache 基本结构 
+
+Cache 存储体主要由 Tag 域和 Data 域构成,其中 Tag 域主要用于判断所访问的指令/数据是否命中,Data 域用于保存 CPU 所需要的指令/数据。那么对于用来访问 Cache 的地址,我们通常将其高阶位作为 Tag 值与 Cache 的 Tag 域中的 Tag 值进行比较,从而判断 CPU 所访问的指令/数据是否命中;将其低阶位作为定位到 Cache 中确定行的 Index(索引值)。根据访问 Cache 所使用 Index 和 Tag 值的来源,我们将 Cache 分为四类 [18] :
+
+1. PI——PT(Physical Index——Physical Tag)
+2. VI——PI（Virtual Index——Physical Tag） 
+3. VI——VT(Virtual Index——Virtual Tag)
+4. PI——VT(Physical Index——Virtual Tag)
+
+本次设计选择使用 PI——PT 类型。
+
+对于  cache_ram 中 tag 和 data 设计的关系，如图 1.3。
+
+[[file:image/cache_ram_relationship.png]]
+
+- 图 1.3：tag 和 data 设计的关系
+
+*** Tag 域的基本结构
+Tag 域主要用于判断 CPU 访问 Cache 时是否命中,那么 Tag 域除了保存 Tag 值以外,在进行 Tag 值的比较时,还需要有 1-bit 的 Valid 位用以表明当前 Tag 域中保存的 Tag 是否是有效的 Tag 值。若当前的 Valid 值为 1(有效),那么 Tag 域中保存的 Tag 值与访问指令 Cache 的地址中的 Tag 字段进行比较就合法,若当前 Valid 值为 0(无效),那么进行 Tag 值的比较就被视为非法。只有当 Valid 值为 1 并且 Tag 值比较相等时,才能说明 CPU 访问指令 Cache 命中,否则访问不命中。
+
+由前面的分析所确定的本次设计指令 Cache 的基本参数,可以知道,指令 Cache 中 Tag 域的大小为 256 行,每行两路,其中每行 Tag 字段的位宽为 40-bit 和 2-bit 的 Valid 字段,以及每行 1-bit 的 LRU 字段用于指明替换的块号,如图 1.4 所示。
+
+[[file:image/icache_tag.png]]
+
+- 图 1.4：Tag 的设计
+
+从图中,我们可以看到,用于访问指令 Cache 的地址中高 20-bit 作为 Tag 值用于与 Tag 域中的 Tag 值进行比较,还有地址中的 11:4 共 8-bit 用于定位 Tag 域作为索引字段,地址中剩下的低 4-bit 后续说明。
+
+*** Data 域的基本结构
+
+指令 Cache 中,Data 域用于保存 CPU 所需要的指令。对于 Cache 的设计,从 Tag 域和 Data 域结构的角度来说,可以分为两大类,一是 Tag 域与 Data 域相联的结构;二是 Tag 域与 Data 分离的结构。如图 1.5(a) 所示,使用 Tag 域与 Data 域相联结构,那么读取 Tag 域来进行比较判断 Cache 是否命中的时候,也会同时读取 Data 域中的四个字,然后再根据 Tag 域比较的结果决定取出的 Data 域数据字是否有效。从这可以看出,1.5(a) 结构 Tag 域和 Data 是并行读取的,会造成 Data 域很多不必要的操作,当 Data 域块容量越大的时候,这种浪费更加明显。
+
+[[file:image/tag_data.png]]
+
+- 图 1.5 Tag 域与 Data 域相联结构
+
+图 1.5(b) 中,使用的是 Tag 域与 Data 域分离结构,那么在读取 Tag 域进行判断访问 Cache 是否命中的同时,就可以不执行 Data 域的读取操作。可以等到得出 Tag 域的比较结果之后,再决定是否进行 Data 域的读取操作。即使是 Tag 域命中需要进行 Data 域的读取操作时,相比于1.5(a) 结构,我们只要增加 2-bit 的索引位,那么在读取 Data 域时,我们也可以只读出我们希望的数据字,而不是将四个数据字都读出再进行选择。可以看出,1.5(b) 结构为串行执行,这样做可以节省很多不必要 Data 域的操作。然而,由于 Tag 域和 Data 是串行执行的,那么 Cache 的访问速度自然也就会受到一定的影响。在本次设计中,Cache 的结构都为 Tag 域与 Data 分离结构,以降低不必要的功耗。
+
+** L1_icache 设计与实现
+*** L1_icache 控制模块的输入输出端口
+一级指令 cache（icache_ctrl）的信号线一览如表 1-3 所示。
+
+- 表1-3：icache_ctrl的信号线一览表
+
+ | 信号名   	  | 信号类型   | 数据类 | 位宽	 | 含义			                    |
+ |--------------+------------+--------+--------+-------------------------------|
+ | clk		      | 输入端口	 | wire	 | 1	    | 时钟			                    |
+ | rst		      | 输入端口	 | wire	 | 1	    | 复位		                      |
+ | if_addr	    | 输入端口	 | wire	 | 32	   | IF 阶段指令地址               |
+ | rw		       | 输入端口	 | wire	 | 1	    | IF 阶段 CPU 读写信号          |
+ | cpu_data	   | 输出端口	 | reg	  | 32	   | CPU 读取的指令                |
+ | miss_stall	 | 输出端口	 | reg	  | 1      | L1_cache 缺失引起的停顿信号   |
+ | lru	        | 输入端口	 | wire	 | 1	    | L1_cache 替换的块号           |
+ | tag0_rd	    | 输入端口	 | wire	 | 21	   | tag0 的读数据                 |
+ | tag1_rd	    | 输入端口	 | wire	 | 21	   | tag1 的读数据                 |
+ | data0_rd 	  | 输入端口	 | wire	 | 128    | data0 的读数据                |
+ | data1_rd     | 输入端口	 | wire	 | 128    | data1 的读数据                |
+ | tag0_rw 	   | 输出端口	 | reg	  | 1	    | tag0 的读写信号               |
+ | tag1_rw   	 | 输出端口	 | reg	  | 1	    | tag1 的读写信号               |
+ | tag_wd 	    | 输出端口	 | wire	 | 21	   | tag 的写数据                  |
+ | data0_rw     | 输出端口	 | reg	  | 1	    | data0 的读写信号              |
+ | data1_rw 	  | 输出端口	 | reg	  | 1	    | data1 的读写信号              |
+ | index   	   | 输出端口	 | wire	 | 8	    | L1_icache 的地址              |
+ | L2_busy   	 | 输入端口	 | wire	 | 1	    | L2_cache 的忙碌信号           |
+ | L2_rdy 	    | 输入端口	 | wire	 | 1	    | L2_cache 的准备信号           |
+ | complete     | 输入端口	 | wire	 | 1	    | 写入 L1 的完成信号            |
+ | irq   	     | 输出端口	 | reg	  | 1	    | 指令 cache 缺失引起的请求信号 |
+
+*** sram_256 模块的输入输出端口
+sram_256 (sram_256) 的信号线一览如表 1-4 所示。
+
+- 图 1-4：sram_256 信号线一览表
+
+| 信号名   	 | 信号类型   | 数据类  | 位宽	  | 含义			           |
+|-------------+------------+---------+---------+----------------------|
+| clk		     | 输入端口	 | wire	  | 1	     | 时钟			           |
+| a 	        | 输入端口	 | wire	  | 8	     | L1_icache 的地址     |
+| wr   	     | 输入端口	 | wire	  | 1	     | L1_icache 的读写信号 |
+| rd   	     | 输入端口	 | wire 	 | WIDTH	 | 自定义长度的的读数据 |
+| wd 	       | 输入端口	 | wire	  | WIDTH	 | 自定义长度的的写数据 |
+
+*** icache_tag 模块的输入输出端口
+icache_tag (tag_ram) 的信号线一览如表 1-5 所示。
+
+- 表 1-5：tag_ram 信号线一览表
+
+| 信号名   	  | 信号类型   | 数据类  | 位宽	 | 含义			          |
+|--------------+------------+---------+--------+---------------------|
+| clk		      | 输入端口	 | wire	  | 1	    | 时钟			          |
+| tag0_rw 	   | 输入端口	 | wire	  | 1	    | tag0 的读写信号     |
+| tag1_rw   	 | 输入端口	 | wire	  | 1	    | tag1 的读写信号     |
+| index   	   | 输入端口	 | wire 	 | 8	    | L1_icache 的地址    |
+| tag_wd 	    | 输入端口	 | wire	  | 21	   | tag 的写数据        |
+| tag0_rd	    | 输出端口	 | wire	  | 21	   | tag0 的读数据       |
+| tag1_rd	    | 输出端口	 | wire	  | 21	   | tag1 的读数据       |
+| LRU	        | 输出端口	 | wire	  | 1	    | L1_cache 替换的块号 |
+| complete     | 输出端口	 | reg	   | 1	    | 写入 L1 的完成信号  |
+
+*** icache_data 模块的输入输出端口
+icache_data (data_ram) 的信号线一览如表 1-6 所示。
+
+- 表 1-6：data_ram 信号线一览表
+
+| 信号名   	 | 信号类型   | 数据类 | 位宽	 | 含义			       |
+|-------------+------------+--------+--------+------------------|
+| clk		     | 输入端口	 | wire	 | 1	    | 时钟			       |
+| data0_rw    | 输入端口	 | wire	 | 1	    | data0 的读写信号 |
+| data1_rw 	 | 输入端口	 | wire	 | 1	    | data1 的读写信号 |
+| index   	  | 输入端口	 | wire	 | 8	    | L1_icache 的地址 |
+| data_wd 	  | 输入端口	 | wire	 | 128    | data 的写数据    |
+| data0_rd 	 | 输出端口	 | wire	 | 128    | data0 的读数据   |
+| data1_rd    | 输出端口	 | wire	 | 128    | data1 的读数据   |
+
+*** L1_icache 的示意图
+
+L1_icache 的结构示意图，如图 1-6 所示。
+
+[[file:image/cache_ram_L1.png]]
+
+- 图 1.6：L1_icache 结构示意图
+
+** L2_cache 设计与实现
+*** L2_cache 控制模块的输入输出端口
+二级 cache 控制模块（L2_cache_ctrl）的信号线一览如表 1-7 所示。
+
+- 表1-7：L2_cache_ctrl 信号线一览表
+
+| 信号名   	     | 信号类型   | 数据类 | 位宽	 | 含义			                    |
+|-----------------+------------+--------+--------+-------------------------------|
+| clk		         | 输入端口	 | wire	 | 1	    | 时钟			                    |
+| rst		         | 输入端口	 | wire	 | 1	    | 复位		                      |
+| if_addr	       | 输入端口	 | wire	 | 32	   | IF 阶段指令地址               |
+| rw		          | 输入端口	 | wire	 | 1	    | IF 阶段 CPU 读写信号          |
+| L2_miss_stall	 | 输出端口	 | reg	  | 1      | L2_cache 缺失引起的停顿信号   |
+| irq   	        | 输入端口	 | wire	 | 1	    | 指令 cache 缺失引起的请求信号 |
+| complete        | 输入端口	 | wire	 | 1	    | 写入 L1 的完成信号            |
+| L2_complete     | 输入端口	 | wire	 | 1	    | 写入 L2 的完成信号            |
+| plru	          | 输入端口	 | wire	 | 3	    | L2_cache 替换算法的信号       |
+| plru_now	      | 输出端口	 | reg	  | 3	    | 当前的 plru 值                |
+| L2_tag0_rd	    | 输入端口	 | wire	 | 19	   | L2_tag0 的读数据              |
+| L2_tag1_rd	    | 输入端口	 | wire	 | 19	   | L2_tag1 的读数据              |
+| L2_tag2_rd	    | 输入端口	 | wire	 | 19	   | L2_tag2 的读数据              |
+| L2_tag3_rd	    | 输入端口	 | wire	 | 19	   | L2_tag3 的读数据              |
+| L2_busy   	    | 输出端口	 | reg	  | 1	    | L2_cache 的忙碌信号           |
+| L2_data0_rd 	  | 输入端口	 | wire	 | 512    | L2_data0 的读数据             |
+| L2_data1_rd     | 输入端口	 | wire	 | 512    | L2_data1 的读数据             |
+| L2_data2_rd 	  | 输入端口	 | wire	 | 512    | L2_data2 的读数据             |
+| L2_data3_rd     | 输入端口	 | wire	 | 512    | L2_data3 的读数据             |
+| data_wd 	      | 输出端口	 | reg	  | 128	  | data 的写数据                 |
+| L2_tag0_rw 	   | 输出端口	 | reg	  | 1	    | L2_tag0 的读写信号            |
+| L2_tag1_rw   	 | 输出端口	 | reg	  | 1	    | L2_tag1 的读写信号            |
+| L2_tag2_rw 	   | 输出端口	 | reg	  | 1	    | L2_tag2 的读写信号            |
+| L2_tag3_rw   	 | 输出端口	 | reg	  | 1	    | L2_tag3 的读写信号            |
+| L2_tag_wd 	    | 输出端口	 | wire	 | 19	   | L2_tag 的写数据               |
+| L2_rdy 	       | 输出端口	 | reg	  | 1	    | L2_cache 的准备信号           |
+| L2_data0_rw     | 输出端口	 | reg	  | 1	    | L2_data0 的读写信号           |
+| L2_data1_rw 	  | 输出端口	 | reg	  | 1	    | L2_data1 的读写信号           |
+| L2_data2_rw     | 输出端口	 | reg	  | 1	    | L2_data2 的读写信号           |
+| L2_data3_rw 	  | 输出端口	 | reg	  | 1	    | L2_data3 的读写信号           |
+| L2_index   	   | 输出端口	 | wire	 | 8	    | L2_cache 的地址               |
+
+*** sram_512 模块的输入输出端口
+sram_512 (sram_512) 的信号线一览如表 1-8 所示。
+
+- 表 1-8：sram_512 信号线一览表
+
+| 信号名   	 | 信号类型   | 数据类  | 位宽	  | 含义			           |
+|-------------+------------+---------+---------+----------------------|
+| clk		     | 输入端口	 | wire	  | 1	     | 时钟			           |
+| a 	        | 输入端口	 | wire	  | 8	     | L2_icache 的地址     |
+| wr   	     | 输入端口	 | wire	  | 1	     | L2_icache 的读写信号 |
+| rd   	     | 输入端口	 | wire 	 | WIDTH	 | 自定义长度的的读数据 |
+| wd 	       | 输入端口	 | wire	  | WIDTH	 | 自定义长度的的写数据 |
+
+*** L2_cache_tag 模块的输入输出端口
+L2_cache_tag (L2_tag_ram) 的信号线一览如表 1-9 所示。
+
+- 表 1-9：L2_tag_ram 信号线一览表
+
+| 信号名   	     | 信号类型   | 数据类 | 位宽	 | 含义			              |
+|-----------------+------------+--------+--------+-------------------------|
+| clk		         | 输入端口	 | wire	 | 1	    | 时钟			              |
+| L2_tag0_rw 	   | 输入端口	 | wire	 | 1	    | L2_tag0 的读写信号      |
+| L2_tag1_rw   	 | 输入端口	 | wire	 | 1	    | L2_tag1 的读写信号      |
+| L2_tag2_rw 	   | 输入端口	 | wire	 | 1	    | L2_tag2 的读写信号      |
+| L2_tag3_rw   	 | 输入端口	 | wire	 | 1	    | L2_tag3 的读写信号      |
+| L2_index   	   | 输入端口	 | wire	 | 8	    | L2_cache 的地址         |
+| plru_now	      | 输入端口	 | wire	 | 3	    | 当前的 plru 值          |
+| L2_tag_wd 	    | 输入端口	 | wire	 | 19	   | L2_tag 的写数据         |
+| L2_tag0_rd	    | 输出端口	 | wire	 | 19	   | L2_tag0 的读数据        |
+| L2_tag1_rd	    | 输出端口	 | wire	 | 19	   | L2_tag1 的读数据        |
+| L2_tag2_rd	    | 输出端口	 | wire	 | 19	   | L2_tag2 的读数据        |
+| L2_tag3_rd	    | 输出端口	 | wire	 | 19	   | L2_tag3 的读数据        |
+| plru	          | 输出端口	 | wire	 | 3	    | L2_cache 替换算法的信号 |
+| L2_complete     | 输出端口   | reg	  | 1	    | 写入 L2 的完成信号      |
+
+*** L2_cache_data 模块的输入输出端口
+L2_cache_data (L2_data_ram) 的信号线一览如表 1-10 所示。
+
+- 表 1-10：L2_data_ram 信号线一览表
+
+| 信号名   	    | 信号类型   | 数据类 | 位宽	 | 含义			          |
+|----------------+------------+--------+--------+---------------------|
+| clk		        | 输入端口	 | wire	 | 1	    | 时钟			          |
+| L2_data0_rw    | 输入端口	 | wire	 | 1	    | L2_data0 的读写信号 |
+| L2_data1_rw 	 | 输入端口	 | wire	 | 1	    | L2_data1 的读写信号 |
+| L2_data2_rw    | 输入端口	 | wire	 | 1	    | L2_data2 的读写信号 |
+| L2_data3_rw 	 | 输入端口	 | wire	 | 1	    | L2_data3 的读写信号 |
+| L2_index   	  | 输入端口	 | wire	 | 8	    | L2_cache 的地址     |
+| L2_data_wd     | 输入端口	 | wire	 | 512    | L2_data 的写数据    |
+| L2_data0_rd    | 输出端口	 | wire	 | 512    | L2_data0 的读数据   |
+| L2_data1_rd    | 输出端口	 | wire	 | 512    | L2_data1 的读数据   |
+| L2_data2_rd 	 | 输出端口	 | wire	 | 512    | L2_data2 的读数据   |
+| L2_data3_rd    | 输出端口	 | wire	 | 512    | L2_data3 的读数据   |
+
+*** L2_cache 的示意图
+
+L2_cache 的结构示意图，如图 1-7 所示。
+
+[[file:image/cache_ram_L2.png]]
+
+- 图 1.7：L2_cache 结构示意图
+
+
